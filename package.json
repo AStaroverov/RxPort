@@ -1,5 +1,5 @@
 {
-  "name": "RxPort",
+  "name": "rxport",
   "description": "RxPort is a library for baking web workers with RxJS",
   "version": "0.0.1",
   "repository": {
