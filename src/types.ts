@@ -7,4 +7,3 @@ export type Envelope<P> = {
 };
 
 export type AnyEnvelope = Envelope<any>;
-

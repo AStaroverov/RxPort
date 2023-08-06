@@ -38,12 +38,12 @@ import {
 import { subscribe } from './utils/subscribe';
 import { dispatch } from './utils/dispatch';
 
-export const AbortChannel = 'AbortChannel';
-export const LoseChannel = 'LoseChannel';
+export const AbortConnectionMessage = 'AbortConnection';
+export const LoseConnectionMessage = 'LoseConnection';
 
 export class RxPort<Request, Response> {
     private mapPortToRequest = new WeakMap<PortLike, ReturnType<typeof createRequest<Request, Response>>>();
-    private mapPortToResponse = new WeakMap<PortLike, ReturnType<typeof createResponse<Request, Response>>>();
+    private mapPortToProducer = new WeakMap<PortLike, ReturnType<typeof createProducer<Request, Response>>>();
 
     constructor(public name: string) {}
 
@@ -56,11 +56,11 @@ export class RxPort<Request, Response> {
     }
 
     createProducer(port: PortLike) {
-        if (!this.mapPortToResponse.has(port)) {
-            this.mapPortToResponse.set(port, createResponse<Request, Response>(this.name, port));
+        if (!this.mapPortToProducer.has(port)) {
+            this.mapPortToProducer.set(port, createProducer<Request, Response>(this.name, port));
         }
 
-        return this.mapPortToResponse.get(port)!;
+        return this.mapPortToProducer.get(port)!;
     }
 }
 
@@ -95,7 +95,7 @@ function createRequest<Request, Response>(type: string, port: PortLike) {
                     mergeMap(onUnlockResponse$),
                     // give time to normally close
                     delay(1000),
-                    map(() => throwingError(LoseChannel)),
+                    map(() => throwingError(LoseConnectionMessage)),
                 );
 
                 dispatch(port, createEnvelope(channelId, type, payload));
@@ -117,26 +117,33 @@ function createRequest<Request, Response>(type: string, port: PortLike) {
     };
 }
 
-function createResponse<Request, Response>(type: string, port: PortLike) {
+function createProducer<Request, Response>(type: string, port: PortLike) {
     const ports$ = extractPorts$(port);
     const abort$ = new Subject<void>();
-    const abortChannel$ = abort$.pipe(map(() => throwingError(AbortChannel)));
-    const createProducer$ = (source$: Observable<Response>) => {
-        source$ = source$.pipe(share());
-        return merge(source$, abortChannel$.pipe(takeUntil(source$.pipe(last()))));
-    };
+
     const onUnlockRequest$ = (id: string) =>
         onUnlock$(getRequestChannelID(id)).pipe(
             // give time to normally close
             delay(1000),
         );
-    const createResponder$ =
+
+    const enhanceSource$ = (source$: Observable<Response>) => {
+        source$ = source$.pipe(share());
+        return merge(
+            source$,
+            abort$.pipe(
+                map(() => throwingError(AbortConnectionMessage)),
+                takeUntil(source$.pipe(last())),
+            ),
+        );
+    };
+    const createProducer$ =
         (createSource$: (payload: Request) => undefined | Observable<Response>) => (envelope: AnyEnvelope) => {
             const unlock = lock(getResponseChannelID(envelope.id));
             const source$ = createSource$(envelope.payload);
 
             if (source$ === undefined) return EMPTY;
-            return createProducer$(source$).pipe(
+            return enhanceSource$(source$).pipe(
                 materialize(),
                 map((notify) => createEnvelope(envelope.id, type, notify)),
                 finalize(unlock),
@@ -155,7 +162,7 @@ function createResponse<Request, Response>(type: string, port: PortLike) {
                                 groupBy((envelope) => envelope.id),
                                 mergeMap((channel$) => {
                                     return channel$.pipe(
-                                        mergeMap(createResponder$(createSource$)),
+                                        mergeMap(createProducer$(createSource$)),
                                         takeUntil(channel$.pipe(filter(isCloseEnvelope))),
                                         catchError(() => EMPTY),
                                     );
